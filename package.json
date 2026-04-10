@@ -1,0 +1,20 @@
+{
+  "name": "@vdhewei/bun-webview-cli",
+  "version": "1.0.0",
+  "description": "bun webview cli",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "rcedit": "npm:rcedit"
+  },
+  "scripts": {
+    "build": "bun build --compile  --windows-hide-console --outfile bin/webview-cli src/index.ts",
+    "compile": "bun run build.ts",
+    "start": "bun run src/index.ts",
+    "prepublishOnly": "bun build"
+  },
+  "author": "VDHewei@github.io",
+  "license": "MIT",
+  "dependencies": {
+    "webview-bun": "^2.4.0"
+  }
+}
