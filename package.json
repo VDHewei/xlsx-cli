@@ -4,13 +4,17 @@
   "description": "bun webview cli",
   "devDependencies": {
     "@types/bun": "latest",
+    "dotenv": "npm:dotenv",
     "rcedit": "npm:rcedit"
   },
   "scripts": {
-    "build": "bun build --compile  --windows-hide-console --outfile bin/webview-cli src/index.ts",
-    "compile": "bun run build.ts",
+    "build": "bun build --compile --minify --compile-autoload-tsconfig --compile-autoload-package-json ./src/index.ts --outfile bin/webview-cli",
+    "compile": "bun run pre-compile && bun run build.ts",
+    "pre-compile": "bun run compile-assets",
     "start": "bun run src/index.ts",
-    "prepublishOnly": "bun build"
+    "compile-assets": "bun run scripts/embed-assets.ts",
+    "prepublishOnly": "bun run compile-assets",
+    "clean": "bun run scripts/clean.ts"
   },
   "author": "VDHewei@github.io",
   "license": "MIT",

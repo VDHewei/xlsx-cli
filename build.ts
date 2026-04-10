@@ -1,15 +1,18 @@
 import {rcedit} from "rcedit";
 import {mkdirSync, writeFileSync, copyFileSync, readFileSync, existsSync, renameSync} from "node:fs";
 import {join, resolve} from "node:path";
+import dotenv from "dotenv";
+
+dotenv.config({quiet: true});
 // ==========================================
 // 1. 构建配置项
 // ==========================================
 const APP_NAME = "webview-cli";
-const ENTRY_FILE = "./src/index.ts";
 const OUT_DIR = "./bin";
 const ICON_DIR = "./assets"; // 需提前准备好 icon.ico (Win), icon.icns (Mac), icon.png (Linux)
 const ICON_FILE = "xlsx-1";
 const DOMAIN = "vdhewei.io";
+const ENTRY_FILES = ["./src/index.ts", /*"./src/worker.ts"*/];
 const VERSION: string = JSON.parse(readFileSync("package.json", {encoding: 'utf-8'})).version;
 // ==========================================
 
@@ -17,6 +20,8 @@ const VERSION: string = JSON.parse(readFileSync("package.json", {encoding: 'utf-
 // ==========================================
 function build() {
     const platform = process.platform; // 'win32' | 'darwin' | 'linux'
+    // const args = process.argv;
+    // console.log("args:", args);
     const outPath = join(OUT_DIR, platform);
     mkdirSync(outPath, {recursive: true});
     console.log(`[1/3] 🚀 开始为 ${platform} 平台编译 Bun 二进制文件...`);
@@ -24,18 +29,26 @@ function build() {
     // Step 1: 调用 Bun 编译裸二进制文件
     const binName = platform === "win32" ? `${APP_NAME}.exe` : APP_NAME;
     const binPath = join(outPath, binName);
-    const cmd = [
-        "bun", "build", "--compile",
+    const compileCmd = ["bun", "build",
+        "--compile",
         "--minify",
-        "--windows-hide-console",
+    ]
+    const flag = process.env[`WINDOWS_HIDE_CONSOLE`];
+    if (flag !== undefined && (flag as string).toLowerCase() === "true") {
+        compileCmd.push("--windows-hide-console");
+    }
+    const argList = [
         "--windows-icon", iconPath,
         "--windows-title", APP_NAME,
         "--windows-version", VERSION,
         "--windows-copyright", DOMAIN,
-        ENTRY_FILE, "--outfile", binPath
-    ]
-    console.log(cmd.join(' '));
-    const compileResult = Bun.spawnSync(cmd);
+        "--compile-autoload-tsconfig",
+        "--compile-autoload-package-json",
+        ...ENTRY_FILES, "--outfile", binPath
+    ];
+    compileCmd.push(...argList);
+    console.log(compileCmd.join(' '));
+    const compileResult = Bun.spawnSync(compileCmd);
     if (compileResult.exitCode !== 0) {
         console.error("编译失败:", compileResult.stderr.toString());
         process.exit(1);
@@ -44,7 +57,7 @@ function build() {
     // Step 2: 根据平台注入 Title 和 Icon
     console.log("[2/3] 🎨 注入图标和应用标题...");
     if (platform === "win32") {
-        injectWinMetadata(binPath, cmd);
+        injectWinMetadata(binPath, compileCmd);
     } else if (platform === "darwin") {
         injectMacMetadata(binPath, outPath);
     } else if (platform === "linux") {
@@ -55,9 +68,9 @@ function build() {
 
 // ==========================================
 // 3. 平台特定后处理实现
-function checkDisableConsole(arg: string[]):boolean {
-    for(const flag of arg){
-        if(flag.trim() === "--windows-hide-console"){
+function checkDisableConsole(arg: string[]): boolean {
+    for (const flag of arg) {
+        if (flag.trim() === "--windows-hide-console") {
             return true;
         }
     }
@@ -85,8 +98,8 @@ function injectWinMetadata(binPath: string, ...args: any[]) {
         }
     }).then(() => {
         console.info("rcedit 执行成功 ✅ ");
-        if(args[0] instanceof Array &&
-            (args[0] as string[]).length>0 && checkDisableConsole(args[0] as string[])){
+        if (args[0] instanceof Array &&
+            (args[0] as string[]).length > 0 && checkDisableConsole(args[0] as string[])) {
             consoleDisableForWindows(binPath);
         }
     }).catch((reason) => {
