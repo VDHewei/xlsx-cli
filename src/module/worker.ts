@@ -19,7 +19,7 @@ type AssetResult = {
 };
 
 const getAssetsData = (name: string): AssetResult | undefined => {
-    const assets: Asset = assetsMap[name] as Asset;
+    const assets = assetsMap[name] as Asset;
     if(assets === undefined || assets.data === undefined || assets.data === null){
         return undefined;
     }
