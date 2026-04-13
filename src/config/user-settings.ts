@@ -1,8 +1,8 @@
 // src/config/user-settings.ts - 用户配置管理模块
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import type { Lang } from "../i18n/index.ts";
+import {existsSync, mkdirSync, readFileSync, writeFileSync} from "node:fs";
+import {join} from "node:path";
+import {includes, type Lang, languages} from "@i18n/index.ts";
 
 export type RuleType = "mergeCell" | "cell" | "rowCell" | "alias";
 
@@ -22,6 +22,7 @@ export type CustomFunction = {
 export type UserSettings = {
     lang: Lang;
     apiHost: string;
+    defaultSaveDir: string;
     rules: CellRule[];
     customFunctions: CustomFunction[];
 };
@@ -39,9 +40,24 @@ const getSettingsFile = (): string => {
     return join(getSettingsDir(), "settings.json");
 };
 
+const getSystemLang = (): Lang => {
+    // 默认获取 操作系统本地语言, 如果 系统语言 不在支持范围内，默认使用 English
+    const systemLang = process.env.LANG || process.env.LANGUAGE || process.env.LC_MESSAGES;
+    if (systemLang!==undefined && systemLang!==null && systemLang && includes(systemLang)) {
+        return systemLang as Lang;
+    }
+    const nav = typeof navigator !== "undefined" ? navigator.language : undefined;
+    console.log("navigator.language:", nav);
+    if(nav!==undefined && nav!==null && nav && includes(nav)){
+        return nav as Lang;
+    }
+    return "en" as Lang;
+};
+
 const defaultSettings: UserSettings = {
-    lang: "zh-CN",
+    lang: getSystemLang(),
     apiHost: "http://localhost:3000",
+    defaultSaveDir: "",
     rules: [],
     customFunctions: [],
 };
@@ -55,6 +71,7 @@ export const loadSettings = (): UserSettings => {
             return {
                 lang: parsed.lang ?? defaultSettings.lang,
                 apiHost: parsed.apiHost ?? defaultSettings.apiHost,
+                defaultSaveDir: parsed.defaultSaveDir ?? defaultSettings.defaultSaveDir,
                 rules: Array.isArray(parsed.rules) ? parsed.rules : defaultSettings.rules,
                 customFunctions: Array.isArray(parsed.customFunctions)
                     ? parsed.customFunctions

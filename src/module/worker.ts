@@ -2,10 +2,9 @@ import { assetsMap } from "./generated-assets.ts";
 import { readXlsx, writeXlsx, applyRulesToSheet, mergeCells, unmergeCells, addRow, addCol, deleteRow, deleteCol, updateCell, type XlsxDocument, type SheetData } from "./xlsx-engine.ts";
 import { readDocx, writeDocx, addParagraph, updateParagraph, deleteParagraph, type DocxDocument } from "./docx-engine.ts";
 import { loadSettings, saveSettings, type UserSettings } from "@config/user-settings.ts";
-import { messages, type Lang } from "@i18n/index.ts";
-import { App } from "@config/app.ts";
+import { messages, type Lang,allLanguages } from "@i18n/index.ts";
 
-const supportedLangs: Lang[] = ["zh-CN", "zh-TW", "en", "ja"];
+const supportedLangs: Lang[] = allLanguages;
 
 /**
  * Detect system language and map to supported lang, fallback to "en"
@@ -115,6 +114,36 @@ async function handleApi(req: Request, pathname: string, url: URL): Promise<Resp
         }
 
         // --- XLSX API ---
+        if (pathname === "/api/xlsx/save-to-dir" && method === "POST") {
+            if (!currentXlsx) return jsonErr("No xlsx document open");
+            const settings = loadSettings();
+            const saveDir = settings.defaultSaveDir || "";
+            if (!saveDir) return jsonErr("No default save directory configured");
+            const buf = writeXlsx(currentXlsx);
+            const fileName = currentXlsx.filePath || "output.xlsx";
+            try {
+                const filePath = `${saveDir}/${fileName}`;
+                await Bun.write(filePath, buf);
+                return jsonOk({ ok: true, path: filePath });
+            } catch (e) {
+                return jsonErr("Failed to save file: " + ((e as Error).message || e));
+            }
+        }
+        if (pathname === "/api/docx/save-to-dir" && method === "POST") {
+            if (!currentDocx) return jsonErr("No docx document open");
+            const settings = loadSettings();
+            const saveDir = settings.defaultSaveDir || "";
+            if (!saveDir) return jsonErr("No default save directory configured");
+            const buf = await writeDocx(currentDocx);
+            const fileName = currentDocx.filePath || "output.docx";
+            try {
+                const filePath = `${saveDir}/${fileName}`;
+                await Bun.write(filePath, buf);
+                return jsonOk({ ok: true, path: filePath });
+            } catch (e) {
+                return jsonErr("Failed to save file: " + ((e as Error).message || e));
+            }
+        }
         if (pathname === "/api/xlsx/open" && method === "POST") {
             const body = (await json()) as { data: string; fileName?: string };
             const buffer = Buffer.from(body.data, "base64").buffer as ArrayBuffer;
@@ -502,6 +531,17 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
     </div>
 
     <div class="settings-section">
+      <h3 data-i18n="settings.defaultSaveDir">默认保存目录</h3>
+      <div class="settings-row">
+        <label data-i18n="settings.defaultSaveDir">保存目录</label>
+        <div style="flex:1;display:flex;gap:6px;">
+          <input type="text" id="settingDefaultSaveDir" placeholder="" style="flex:1;">
+          <button class="btn btn-sm" id="btnBrowseSaveDir"><span data-i18n="settings.defaultSaveDir.browse">浏览</span></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h3 data-i18n="settings.rules">常用规则</h3>
       <div id="rulesContainer"></div>
       <div style="margin-top:8px;display:flex;gap:8px;">
@@ -532,6 +572,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
 
 <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none" onchange="handleFileSelect(event,'xlsx')">
 <input type="file" id="fileInputDocx" accept=".docx" style="display:none" onchange="handleFileSelect(event,'docx')">
+<input type="file" id="dirInput" webkitdirectory directory style="display:none" onchange="handleDirSelect(event)">
 
 <script>
 // ===== State =====
@@ -654,7 +695,24 @@ dropZone.addEventListener("drop", (e) => {
   else showToast("Unsupported file type", "error");
 });
 
+// Directory selection for default save dir
+document.getElementById("btnBrowseSaveDir").addEventListener("click", () => {
+  document.getElementById("dirInput").click();
+});
+function handleDirSelect(event) {
+  const files = event.target.files;
+  if (files && files.length > 0) {
+    // Get the common parent path from the first file's webkitRelativePath
+    const firstPath = files[0].webkitRelativePath;
+    const dirPath = firstPath.substring(0, firstPath.indexOf("/"));
+    document.getElementById("settingDefaultSaveDir").value = dirPath;
+  }
+}
+
 // ===== XLSX Rendering =====
+const DEFAULT_MIN_COLS = 26; // A-Z
+const DEFAULT_MIN_ROWS = 50;
+
 function renderXlsx() {
   if (!xlsxData || !xlsxData.sheets.length) return;
   const sheet = xlsxData.sheets[xlsxActiveSheet];
@@ -686,30 +744,48 @@ function renderXlsx() {
   // Spreadsheet
   const container = document.getElementById("spreadsheetContainer");
   const rows = sheet.cells || [];
-  const maxCols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  const dataMaxCols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  const maxCols = Math.max(dataMaxCols, DEFAULT_MIN_COLS);
+  const totalRows = Math.max(rows.length, DEFAULT_MIN_ROWS);
   const merges = sheet.merges || [];
   const colWidths = sheet.colWidths || [];
   const rowHeights = sheet.rowHeights || [];
 
+  // Build a merge lookup map: for each merged cell that is NOT top-left, mark skip
+  const mergeSkipMap = new Map(); // "r,c" -> true
+  const mergeSpanMap = new Map();  // "r,c" -> {rowspan, colspan}
+  merges.forEach(m => {
+    for (let r = m.s.r; r <= m.e.r; r++) {
+      for (let c = m.s.c; c <= m.e.c; c++) {
+        if (r !== m.s.r || c !== m.s.c) {
+          mergeSkipMap.set(r + "," + c, true);
+        } else {
+          mergeSpanMap.set(r + "," + c, { rowspan: m.e.r - m.s.r + 1, colspan: m.e.c - m.s.c + 1 });
+        }
+      }
+    }
+  });
+
   let html = '<table class="spreadsheet"><thead><tr><th class="corner"></th>';
   for (let c = 0; c < maxCols; c++) {
-    const w = colWidths[c] ? Math.max(colWidths[c] * 8, 40) : 80; // convert char width approx
-    html += '<th style="width:' + w + 'px">' + colName(c) + '</th>';
+    const w = colWidths[c] ? Math.max(colWidths[c] * 8, 40) : 100;
+    html += '<th style="width:' + w + 'px;min-width:' + w + 'px">' + colName(c) + '</th>';
   }
   html += '</tr></thead><tbody>';
 
-  for (let r = 0; r < rows.length; r++) {
+  for (let r = 0; r < totalRows; r++) {
     const rh = rowHeights[r];
     const rowStyle = rh ? ' style="height:' + (rh * 1.3) + 'px"' : '';
     html += '<tr' + rowStyle + '><th class="row-header">' + (r + 1) + '</th>';
     for (let c = 0; c < maxCols; c++) {
-      const cell = rows[r][c] || {};
-      const isMerged = cell.isMerged || false;
-      // Check if this is the top-left of a merge
-      const merge = merges.find(m => m.s.r === r && m.s.c === c);
-      const rowspan = merge ? (merge.e.r - merge.s.r + 1) : 1;
-      const colspan = merge ? (merge.e.c - merge.s.c + 1) : 1;
-      if (isMerged && !merge) continue; // skip non-top-left merged cells
+      // Skip non-top-left merged cells
+      if (mergeSkipMap.get(r + "," + c)) continue;
+
+      const cell = (rows[r] && rows[r][c]) ? rows[r][c] : {};
+      const isMerged = !!mergeSpanMap.get(r + "," + c);
+      const spanInfo = mergeSpanMap.get(r + "," + c) || {};
+      const rowspan = spanInfo.rowspan || 1;
+      const colspan = spanInfo.colspan || 1;
 
       const val = cell.v !== null && cell.v !== undefined ? cell.v : "";
       const dropdown = cell.dropdown;
@@ -745,8 +821,11 @@ function buildCellStyle(style) {
   const parts = [];
   if (style.bold) parts.push("font-weight:bold");
   if (style.italic) parts.push("font-style:italic");
-  if (style.underline) parts.push("text-decoration:underline");
-  if (style.strike) parts.push("text-decoration:line-through");
+  // Combine underline and strike into single text-decoration
+  const decor = [];
+  if (style.underline) decor.push("underline");
+  if (style.strike) decor.push("line-through");
+  if (decor.length > 0) parts.push("text-decoration:" + decor.join(" "));
   if (style.fontSize) parts.push("font-size:" + style.fontSize + "px");
   if (style.fontName) parts.push('font-family:"' + escHtml(style.fontName) + '"');
   if (style.fontColor) parts.push("color:" + style.fontColor);
@@ -805,6 +884,14 @@ function onCellBlur(el, r, c) {
 async function saveXlsx() {
   if (!xlsxData) return;
   showToast(t('common.save') + "...");
+  const res = await fetch("/api/xlsx/save-to-dir", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({}) });
+  const json = await res.json();
+  if (json.ok) {
+    showToast(t('common.save') + ' → ' + json.data.path, "success");
+  } else {
+    // Fallback to download if no default dir configured
+    showToast(json.error || "Save failed, try Export instead", "error");
+  }
 }
 
 async function downloadXlsx() {
@@ -864,7 +951,7 @@ function renderDocx() {
   // Render images first (if they exist)
   if (images && images.length > 0) {
     html += '<div style="margin:12px 0;padding:8px;background:#f8f9fa;border:1px solid #e0e0e0;border-radius:6px;">';
-    html += '<strong style="display:block;margin-bottom:6px;color:#666;font-size:12px;">' + t('docx.images' || 'Images') + ' (' + images.length + ')</strong>';
+    html += '<strong style="display:block;margin-bottom:6px;color:#666;font-size:12px;">' + (t('docx.images') || 'Images') + ' (' + images.length + ')</strong>';
     for (const img of images) {
       const wPx = Math.round(img.width / 9525); // EMU to px (approximate, 1 inch=914400 EMU, 96dpi => 1 inch=96px => 9525 EMU/px)
       const hPx = Math.round(img.height / 9525);
@@ -881,8 +968,11 @@ function renderDocx() {
     // Build inline style from paragraph properties
     if (p.bold) styleParts.push("font-weight:bold");
     if (p.italic) styleParts.push("font-style:italic");
-    if (p.underline) styleParts.push("text-decoration:underline");
-    if (p.strike) styleParts.push("text-decoration:line-through");
+    // Combine underline and strike into single text-decoration
+    const decor = [];
+    if (p.underline) decor.push("underline");
+    if (p.strike) decor.push("line-through");
+    if (decor.length > 0) styleParts.push("text-decoration:" + decor.join(" "));
     if (p.fontSize) styleParts.push("font-size:" + Math.max(p.fontSize, 10) + "px");
     if (p.fontColor) styleParts.push("color:" + p.fontColor);
     if (p.alignment === "center") styleParts.push("text-align:center");
@@ -939,7 +1029,15 @@ async function addDocxParagraph() {
 }
 
 async function saveDocx() {
+  if (!docxData) return;
   showToast(t('common.save') + "...");
+  const res = await fetch("/api/docx/save-to-dir", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({}) });
+  const json = await res.json();
+  if (json.ok) {
+    showToast(t('common.save') + ' → ' + json.data.path, "success");
+  } else {
+    showToast(json.error || "Save failed, try Export instead", "error");
+  }
 }
 
 async function downloadDocx() {
@@ -962,6 +1060,7 @@ async function loadAndRenderSettings() {
 
   document.getElementById("settingLang").value = s.lang || "zh-CN";
   document.getElementById("settingApiHost").value = s.apiHost || "";
+  document.getElementById("settingDefaultSaveDir").value = s.defaultSaveDir || "";
   currentLang = s.lang || "zh-CN";
 
   // Rules
@@ -1016,6 +1115,7 @@ function getSettingsFromForm() {
   return {
     lang: document.getElementById("settingLang").value,
     apiHost: document.getElementById("settingApiHost").value,
+    defaultSaveDir: document.getElementById("settingDefaultSaveDir").value.trim(),
     rules,
     customFunctions,
   };
@@ -1120,6 +1220,7 @@ fetch("/api/settings").then(r => r.json()).then(json => {
   if (json.ok) {
     document.getElementById("settingLang").value = json.data.lang || currentLang;
     document.getElementById("settingApiHost").value = json.data.apiHost || "";
+    document.getElementById("settingDefaultSaveDir").value = json.data.defaultSaveDir || "";
   }
 });
 </script>

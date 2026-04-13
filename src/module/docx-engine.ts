@@ -2,8 +2,9 @@
 
 import {
     Document, Packer, Paragraph, TextRun, HeadingLevel,
-    AlignmentType, UnderlineType,
+    AlignmentType, UnderlineType, PageOrientation,
     type IRunOptions, type IParagraphOptions,
+    Header,
 } from "docx";
 
 export type DocxContent = {
@@ -45,30 +46,64 @@ export const readDocx = async (buffer: ArrayBuffer): Promise<DocxDocument> => {
     const bytes = new Uint8Array(buffer);
 
     // Check if this looks like a ZIP file (PK magic bytes)
-    if (bytes[0] !== 0x50 || bytes[1] !== 0x4B) {
+    if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4B) {
+        console.warn("readDocx: Not a valid ZIP/DOCX file (bad magic bytes)");
         return { content: { paragraphs: [], images: [] } };
     }
 
-    // Extract document.xml and [Content_Types].xml for image detection
-    const documentXml = await extractZipEntry(bytes, "word/document.xml");
-    if (!documentXml) {
+    // Extract document.xml
+    let documentXml: Uint8Array | null = null;
+    try {
+        documentXml = await extractZipEntry(bytes, "word/document.xml");
+    } catch (e) {
+        console.error("readDocx: Failed to extract document.xml:", e);
+    }
+
+    if (!documentXml || documentXml.length === 0) {
+        console.warn("readDocx: document.xml not found or empty");
+        return { content: { paragraphs: [], images: [] } };
+    }
+
+    // Try to extract relationships for image detection
+    let relsXml: Uint8Array | null = null;
+    try {
+        relsXml = await extractZipEntry(bytes, "word/_rels/document.xml.rels");
+    } catch {
+        relsXml = null; // non-critical, ignore
+    }
+
+    // Extract content types
+    let contentTypesXml: Uint8Array | null = null;
+    try {
+        contentTypesXml = await extractZipEntry(bytes, "[Content_Types].xml");
+    } catch {
+        contentTypesXml = null;
+    }
+
+    const xmlStr = new TextDecoder("utf-8", { fatal: false }).decode(documentXml);
+    if (!xmlStr || xmlStr.trim().length === 0) {
+        console.warn("readDocx: document.xml is empty after decoding");
         return { content: { paragraphs: [] } };
     }
 
-    // Also try to extract relationships to find images
-    const relsXml = await extractZipEntry(bytes, "word/_rels/document.xml.rels");
-    // Extract content types to understand image MIME types
-    const contentTypesXml = await extractZipEntry(bytes, "[Content_Types].xml");
+    let parsedDoc: DocxDocument;
+    try {
+        parsedDoc = parseDocxXml(xmlStr);
+    } catch (e) {
+        console.error("readDocx: Failed to parse XML:", e);
+        parsedDoc = { content: { paragraphs: [] } };
+    }
 
-    const xmlStr = new TextDecoder("utf-8").decode(documentXml);
-    const parsedDoc = parseDocxXml(xmlStr);
-
-    // Extract images if present
+    // Extract images if present (non-critical, best-effort)
     let images: DocxImage[] = [];
     if (relsXml && contentTypesXml) {
-        const relsStr = new TextDecoder("utf-8").decode(relsXml);
-        const ctStr = new TextDecoder("utf-8").decode(contentTypesXml);
-        images = await extractImages(bytes, relsStr, ctStr);
+        try {
+            const relsStr = new TextDecoder("utf-8", { fatal: false }).decode(relsXml);
+            const ctStr = new TextDecoder("utf-8", { fatal: false }).decode(contentTypesXml);
+            images = await extractImages(bytes, relsStr, ctStr);
+        } catch (e) {
+            console.warn("readDocx: Image extraction failed (non-critical):", e);
+        }
     }
 
     return {
@@ -88,23 +123,39 @@ export const readDocx = async (buffer: ArrayBuffer): Promise<DocxDocument> => {
 function parseDocxXml(xml: string): DocxDocument {
     const paragraphs: DocxParagraph[] = [];
 
+    if (!xml || typeof xml !== "string") return { content: { paragraphs: [] } };
+
     // Normalize XML - remove namespace prefixes for easier matching
-    const normalized = normalizeDocxXml(xml);
+    let normalized: string;
+    try {
+        normalized = normalizeDocxXml(xml);
+    } catch {
+        normalized = xml; // fallback to raw xml
+    }
 
     // Split by paragraph closing tags
     const pParts = normalized.split(/<\/w:p>/);
 
     for (const part of pParts) {
         const trimmed = part.trim();
-        if (!trimmed.includes("<w:p")) continue;
+        if (!trimmed || !trimmed.includes("<w:p")) continue;
 
         // --- Paragraph-level properties ---
-        // Heading style from pPr/pStyle
-        const headingMatch = trimmed.match(/<w:pStyle[^>]*w:val="[^"]*Heading(\d)[^"]*"/i);
+        // Heading style from pPr/pStyle - handle multiple patterns
+        let headingMatch = trimmed.match(/<w:pStyle[^>]*w:val="[^"]*Heading(\d)[^"]*"/i);
+        if (!headingMatch) {
+            // Try alternative pattern where val comes before Heading
+            headingMatch = trimmed.match(/<w:pStyle[^>]*val="[^"]*Heading(\d)[^"]*"[^>]*>/i);
+        }
+        if (!headingMatch) {
+            // Try pattern with just Heading number
+            headingMatch = trimmed.match(/<w:pStyle[^>]+Heading(\d)/i);
+        }
         const heading = headingMatch ? parseInt(headingMatch[1] ?? "1") : undefined;
+        if (heading && isNaN(heading)) continue;
 
         // Alignment
-        const alignMatch = trimmed.match(/<w:jc[^>]*w:val="(center|right|left|start|end|both|distributed)"/i);
+        const alignMatch = trimmed.match(/<w:jc[^>]*?:?val="?(center|right|left|start|end|both|distributed)"?/i);
         let alignment: "left" | "center" | "right" | undefined;
         if (alignMatch) {
             const val = alignMatch[1];
@@ -119,50 +170,69 @@ function parseDocxXml(xml: string): DocxDocument {
         const runs: { text: string; styles: Partial<DocxParagraph> }[] = [];
 
         for (const rPart of rParts) {
-            if (!rPart.includes("<w:r")) continue;
+            if (!rPart || !rPart.includes("<w:r")) continue;
 
             const runStyles: Partial<DocxParagraph> = {};
 
-            // Extract run properties block
-            const rPrStart = rPart.indexOf("<w:rPr");
-            const rPrEnd = rPart.indexOf("</w:rPr>");
+            // Extract run properties block - be more flexible with matching
+            let rPrStart = rPart.indexOf("<w:rPr");
+            // Handle self-closing tag <w:rPr/>
+            if (rPrStart !== -1) {
+                const nextCharIdx = rPrStart + 5;
+                // Check if it's a valid opening or self-closing
+                if (rPart[nextCharIdx] === "/" || rPart.substring(nextCharIdx, nextCharIdx + 2).includes("/>")) {
+                    // Self-closing, no styles inside
+                    rPrStart = -1;
+                }
+            }
+            let rPrEnd = rPart.indexOf("</w:rPr>");
             if (rPrStart !== -1 && rPrEnd > rPrStart) {
                 const rPr = rPart.substring(rPrStart, rPrEnd + 7); // include </w:rPr>
 
                 // Bold
-                if (/<w:b\s|<w:b>|<w:b\/>/i.test(rPr)) runStyles.bold = true;
+                if (/<w:b[\s>]/i.test(rPr)) runStyles.bold = true;
                 else if (/<w:b[^>]*w:val="false"/i.test(rPr)) runStyles.bold = false;
-                else if (!/<w:b/i.test(rPr)) { /* not set */ }
 
                 // Italic
-                if (/<w:i\s|<w:i>|<w:i\/>/i.test(rPr)) runStyles.italic = true;
+                if (/<w:i[\s>]/i.test(rPr)) runStyles.italic = true;
 
                 // Underline
-                if (/<w:u\s|<w:u>/i.test(rPr)) runStyles.underline = true;
+                if (/<w:u[\s>]/i.test(rPr)) runStyles.underline = true;
 
                 // Strike / Double-strike-through
-                if (/<w:strike\s|<w:strike>|<w:strike\/>/i.test(rPr)) runStyles.strike = true;
+                if (/<w:strike[\s>]|<w:strike\/>/i.test(rPr)) runStyles.strike = true;
                 if (/<w:dstrike/i.test(rPr)) runStyles.strike = true;
 
-                // Font size (in half-points)
-                const szMatch = rPr.match(/<w:sz[^>]*w:val="(\d+)"/i);
-                if (szMatch) runStyles.fontSize = parseInt(szMatch[1]) / 2;
+                // Font size (in half-points) - also check w:szCs for complex script
+                let szMatch = rPr.match(/<w:sz[^>]*?:?val="?(\d+)"?/i);
+                if (!szMatch) szMatch = rPr.match(/<w:szCs[^>]*?:?val="?(\d+)"?/i);
+                if (szMatch) {
+                    const parsedSize = parseInt(szMatch[1]);
+                    if (!isNaN(parsedSize)) runStyles.fontSize = parsedSize / 2;
+                }
 
                 // Font color
-                const colorMatch = rPr.match(/<w:color[^>]*w:val="([0-9A-Fa-f]{6}|auto)"/i);
+                const colorMatch = rPr.match(/<w:color[^>]*?:?val="?([0-9A-Fa-f]{6}|auto)"?/i);
                 if (colorMatch && colorMatch[1] !== "auto") runStyles.fontColor = "#" + colorMatch[1].toLowerCase();
 
-                // Font name
-                const fontMatch = rPr.match(/<w:rFonts[^>]*w:ascii="([^"]+)"/i);
+                // Font name - multiple attributes possible
+                let fontMatch = rPr.match(/<w:rFonts[^>]*?:?ascii="([^"]+)"/i);
+                if (!fontMatch) fontMatch = rPr.match(/<w:rFonts[^>]*?:?hAnsi="([^"]+)"/i);
                 if (fontMatch) runStyles.fontName = fontMatch[1];
             }
 
-            // Extract all <w:t> text nodes in this run (handle multiple per run)
+            // Extract all <w:t> text nodes in this run (handle multiple per run, preserve spaces)
             let runText = "";
             const tRegex = /<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g;
             let tMatch: RegExpExecArray | null;
             while ((tMatch = tRegex.exec(rPart)) !== null) {
-                if (tMatch[1]) runText += tMatch[1];
+                if (tMatch[1] != null) runText += tMatch[1];
+            }
+            // Also try <w:delText> for tracked deletions (treat as normal text)
+            const dtRegex = /<w:delText(?:\s[^>]*)?>([^<]*)<\/w:delText>/g;
+            let dtMatch: RegExpExecArray | null;
+            while ((dtMatch = dtRegex.exec(rPart)) !== null) {
+                if (dtMatch[1] != null) runText += dtMatch[1];
             }
 
             if (runText.length > 0) {
@@ -231,73 +301,151 @@ async function extractImages(zipBytes: Uint8Array, relsXml: string, _contentType
 /**
  * Extract a file from a ZIP archive ( ArrayBuffer )
  * Minimal ZIP parser - handles STORED and DEFLATE entries
+ * Also handles entries with data descriptor (bit 3 of general purpose flag)
  */
 async function extractZipEntry(data: Uint8Array, targetPath: string): Promise<Uint8Array | null> {
     let offset = 0;
     const view = new DataView(data.buffer);
+    const len = data.length;
 
-    while (offset < data.length - 4) {
+    while (offset < len - 4) {
         // Check for local file header signature (0x04034b50)
         const sig = view.getUint32(offset, true);
-        if (sig !== 0x04034b50) break;
+        if (sig !== 0x04034b50) {
+            // Try scanning forward for next signature (handle corrupted or non-standard zips)
+            offset++;
+            continue;
+        }
 
+        // General purpose bit flag
+        const gpFlag = view.getUint16(offset + 6, true);
+        // Compression method
         const compressionMethod = view.getUint16(offset + 8, true);
-        const compressedSize = view.getUint32(offset + 18, true);
-        const uncompressedSize = view.getUint32(offset + 22, true);
+
+        // For entries with data descriptor, sizes are in the descriptor after data
+        // We need to check if sizes are zero (data descriptor present) or actual values
+        let compressedSize = view.getUint32(offset + 18, true);
+        let uncompressedSize = view.getUint32(offset + 22, true);
+
         const fileNameLen = view.getUint16(offset + 26, true);
         const extraFieldLen = view.getUint16(offset + 28, true);
 
         const fileNameBytes = data.slice(offset + 30, offset + 30 + fileNameLen);
-        const fileName = new TextDecoder("utf-8").decode(fileNameBytes);
+        const fileName = new TextDecoder("utf-8", { fatal: false }).decode(fileNameBytes).replace(/\0.*$/, "");
 
         const dataOffset = offset + 30 + fileNameLen + extraFieldLen;
-        const compressedData = data.slice(dataOffset, dataOffset + compressedSize);
 
-        if (fileName === targetPath) {
-            if (compressionMethod === 0) {
-                // STORED
-                return compressedData;
-            } else if (compressionMethod === 8) {
-                // DEFLATE - use DecompressionStream
-                return inflateData(compressedData, uncompressedSize);
+        // If data descriptor flag is set (bit 3), we may have 0/0 for sizes
+        // In this case we find the next header or end of file
+        if ((gpFlag & (1 << 3)) !== 0 && compressedSize === 0 && uncompressedSize === 0) {
+            // Search for next signature (local file header 0x04034b50 or central dir 0x02014b50)
+            let searchOffset = dataOffset;
+            while (searchOffset < len - 4) {
+                const nextSig = view.getUint32(searchOffset, true);
+                if (nextSig === 0x04034b50 || nextSig === 0x02014b50) {
+                    break;
+                }
+                searchOffset++;
             }
-            return null;
+            compressedSize = searchOffset - dataOffset;
+            // For deflate with unknown uncompressed size, use compressed size as estimate
+            uncompressedSize = Math.max(compressedSize * 4, 65536); // rough upper bound
         }
 
-        offset = dataOffset + compressedSize;
+        // Safety bounds check
+        if (dataOffset < 0 || dataOffset > len) break;
+        const safeCompressedSize = Math.min(compressedSize, len - dataOffset);
+        if (safeCompressedSize <= 0) return null;
+
+        const compressedData = data.slice(dataOffset, dataOffset + safeCompressedSize);
+
+        if (fileName === targetPath || fileName.replace(/\\/g, "/") === targetPath) {
+            if (compressionMethod === 0) {
+                // STORED - no compression
+                return new Uint8Array(compressedData);
+            } else if (compressionMethod === 8) {
+                // DEFLATE
+                try {
+                    return await inflateData(compressedData, Math.max(uncompressedSize, safeCompressedSize));
+                } catch (e) {
+                    console.error("Failed to inflate entry:", fileName, e);
+                    return null;
+                }
+            }
+            return null; // unsupported compression method
+        }
+
+        // Move past this entry's data
+        const nextOffset = dataOffset + compressedSize;
+        if (nextOffset >= len) break;
+        offset = nextOffset;
     }
 
     return null;
 }
 
-async function inflateData(data: Uint8Array, _expectedSize: number): Promise<Uint8Array> {
-    const ds = new DecompressionStream("deflate-raw");
-    const writer = ds.writable.getWriter();
-    await writer.write(data as unknown as BufferSource);
-    await writer.close();
-
-    const reader = ds.readable.getReader();
-    const chunks: Uint8Array[] = [];
-
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
+async function inflateData(data: Uint8Array, expectedSize: number): Promise<Uint8Array> {
+    // Try Bun's built-in decompress first (most reliable in Bun runtime)
+    try {
+        // Bun supports Buffer-like operations on Uint8Array
+        const result = await Bun.write(
+            new Uint8Array(expectedSize),
+            new Response(data).body! as unknown as BodyInit,
+        );
+        if (result && result instanceof Uint8Array && result.length > 0) {
+            return result;
+        }
+    } catch {
+        // fall through to other methods
     }
 
-    const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
-    const result = new Uint8Array(totalLen);
-    let pos = 0;
-    for (const chunk of chunks) {
-        result.set(chunk, pos);
-        pos += chunk.length;
+    // Method 2: Use DecompressionStream if available
+    try {
+        if (typeof DecompressionStream !== "undefined") {
+            const ds = new DecompressionStream("deflate-raw");
+            const writer = ds.writable.getWriter();
+            await writer.write(data as unknown as BufferSource);
+            await writer.close();
+
+            const reader = ds.readable.getReader();
+            const chunks: Uint8Array[] = [];
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+            }
+
+            if (chunks.length > 0) {
+                const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
+                const result = new Uint8Array(totalLen);
+                let pos = 0;
+                for (const chunk of chunks) {
+                    result.set(chunk, pos);
+                    pos += chunk.length;
+                }
+                return result;
+            }
+        }
+    } catch {
+        // fall through
     }
 
-    return result;
+    // Method 3: Manual fallback using Bun's zlib via dynamic import
+    try {
+        // In some Bun versions we can use node:zlib
+        const zlib = await import("node:zlib");
+        const buf = Buffer.from(data);
+        const decompressed = zlib.inflateRawSync(buf);
+        return new Uint8Array(decompressed.buffer, decompressed.byteOffset, decompressed.byteLength);
+    } catch {
+        // All methods failed
+        throw new Error("Unable to decompress data: no suitable decompression method available");
+    }
 }
 
 /**
- * 将 DocxDocument 写入 ArrayBuffer（保留样式）
+ * 将 DocxDocument 写入 ArrayBuffer（保留样式，兼容 WPS/Word 预览）
  */
 export const writeDocx = async (doc: DocxDocument): Promise<ArrayBuffer> => {
     const paragraphs: Paragraph[] = doc.content.paragraphs.map((p) => {
@@ -329,9 +477,10 @@ export const writeDocx = async (doc: DocxDocument): Promise<ArrayBuffer> => {
         });
     });
 
+    // Ensure at least one empty paragraph for valid document structure
     const sectionChildren = paragraphs.length > 0
         ? paragraphs
-        : [new Paragraph({ children: [] })];
+        : [new Paragraph({ children: [new TextRun("")] })];
 
     // Add images after paragraphs if present
     if (doc.content.images && doc.content.images.length > 0) {
@@ -341,7 +490,27 @@ export const writeDocx = async (doc: DocxDocument): Promise<ArrayBuffer> => {
     }
 
     const d = new Document({
-        sections: [{ children: sectionChildren }],
+        creator: "xlsx-cli",
+        description: "Created by xlsx-cli",
+        title: doc.filePath || "Untitled",
+        sections: [{
+            properties: {
+                page: {
+                    margin: {
+                        top: 1440,     // 1 inch (twips)
+                        right: 1440,
+                        bottom: 1440,
+                        left: 1440,
+                    },
+                    size: {
+                        orientation: PageOrientation.PORTRAIT,
+                        width: 12240,  // Letter width (8.5 inches)
+                        height: 15840, // Letter height (11 inches)
+                    },
+                },
+            },
+            children: sectionChildren,
+        }],
     });
 
     const buf = await Packer.toBuffer(d);

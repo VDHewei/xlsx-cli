@@ -1,6 +1,8 @@
 // src/i18n/index.ts - i18n 国际化模块
 
-export type Lang = "zh-CN" | "zh-TW" | "en" | "ja";
+export const languages = ["zh-CN", "zh-TW", "en", "ja"] as const;
+
+export type Lang = (typeof languages)[number];
 
 const messages: Record<Lang, Record<string, string>> = {
     "zh-CN": {
@@ -63,6 +65,9 @@ const messages: Record<Lang, Record<string, string>> = {
         "docx.paragraph": "段落",
         "docx.font": "字体",
         "docx.fontSize": "字号",
+        "docx.images": "图片",
+        "docx.empty": "未找到内容。该文档可能为空或使用了不支持的格式。",
+        "docx.imageCount": "发现 {n} 张图片",
 
         // 设置
         "settings.title": "设置",
@@ -73,6 +78,9 @@ const messages: Record<Lang, Record<string, string>> = {
         "settings.lang.ja": "日本語",
         "settings.api": "API 设置",
         "settings.api.host": "Host 地址",
+        "settings.defaultSaveDir": "默认保存目录",
+        "settings.defaultSaveDir.placeholder": "留空则使用系统默认下载目录",
+        "settings.defaultSaveDir.browse": "浏览",
         "settings.rules": "常用规则",
         "settings.rules.mergeCell": "合并单元格规则",
         "settings.rules.cell": "单元格规则",
@@ -143,6 +151,9 @@ const messages: Record<Lang, Record<string, string>> = {
         "docx.paragraph": "段落",
         "docx.font": "字型",
         "docx.fontSize": "字號",
+        "docx.images": "圖片",
+        "docx.empty": "未找到內容。該文件可能為空或使用了不支援的格式。",
+        "docx.imageCount": "發現 {n} 張圖片",
 
         "settings.title": "設定",
         "settings.lang": "語言",
@@ -152,6 +163,9 @@ const messages: Record<Lang, Record<string, string>> = {
         "settings.lang.ja": "日本語",
         "settings.api": "API 設定",
         "settings.api.host": "Host 位址",
+        "settings.defaultSaveDir": "預設儲存目錄",
+        "settings.defaultSaveDir.placeholder": "留空則使用系統預設下載目錄",
+        "settings.defaultSaveDir.browse": "瀏覽",
         "settings.rules": "常用規則",
         "settings.rules.mergeCell": "合併儲存格規則",
         "settings.rules.cell": "儲存格規則",
@@ -222,6 +236,9 @@ const messages: Record<Lang, Record<string, string>> = {
         "docx.paragraph": "Paragraph",
         "docx.font": "Font",
         "docx.fontSize": "Font Size",
+        "docx.images": "Images",
+        "docx.empty": "No content found. This document may be empty or use unsupported formatting.",
+        "docx.imageCount": "Found {n} image(s)",
 
         "settings.title": "Settings",
         "settings.lang": "Language",
@@ -231,6 +248,9 @@ const messages: Record<Lang, Record<string, string>> = {
         "settings.lang.ja": "日本語",
         "settings.api": "API Settings",
         "settings.api.host": "Host URL",
+        "settings.defaultSaveDir": "Default Save Directory",
+        "settings.defaultSaveDir.placeholder": "Leave empty for system default downloads folder",
+        "settings.defaultSaveDir.browse": "Browse",
         "settings.rules": "Common Rules",
         "settings.rules.mergeCell": "Merge Cell Rules",
         "settings.rules.cell": "Cell Rules",
@@ -301,6 +321,9 @@ const messages: Record<Lang, Record<string, string>> = {
         "docx.paragraph": "段落",
         "docx.font": "フォント",
         "docx.fontSize": "フォントサイズ",
+        "docx.images": "画像",
+        "docx.empty": "コンテンツが見つかりません。このドキュメントは空か、サポートされていない形式を使用しています。",
+        "docx.imageCount": "{n} 枚の画像が見つかりました",
 
         "settings.title": "設定",
         "settings.lang": "言語",
@@ -310,6 +333,9 @@ const messages: Record<Lang, Record<string, string>> = {
         "settings.lang.ja": "日本語",
         "settings.api": "API 設定",
         "settings.api.host": "Host URL",
+        "settings.defaultSaveDir": "デフォルト保存先",
+        "settings.defaultSaveDir.placeholder": "空欄の場合はシステムのデフォルトダウンロードフォルダを使用",
+        "settings.defaultSaveDir.browse": "参照",
         "settings.rules": "共通ルール",
         "settings.rules.mergeCell": "セル結合ルール",
         "settings.rules.cell": "セルルール",
@@ -327,4 +353,19 @@ const messages: Record<Lang, Record<string, string>> = {
     },
 };
 
-export { messages };
+const iterateEnum = function <T extends readonly string[]>(enumObj: T): Array<{ key: number, value: T[number] }> {
+    return enumObj.map((value, index) => ({
+        key: index,
+        value
+    }));
+}
+
+const languageMap = iterateEnum(languages);
+
+const includes = (str: string): boolean => {
+    return languageMap.some(item => item.value === str);
+}
+
+const allLanguages = languageMap.map(item => item.value);
+
+export { messages ,includes,allLanguages};
