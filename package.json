@@ -14,11 +14,15 @@
     "start": "bun run src/index.ts",
     "compile-assets": "bun run scripts/embed-assets.ts",
     "prepublishOnly": "bun run compile-assets",
-    "clean": "bun run scripts/clean.ts"
+    "clean": "bun run scripts/clean.ts",
+    "test": "bun test"
   },
   "author": "VDHewei@github.io",
   "license": "MIT",
   "dependencies": {
-    "webview-bun": "^2.4.0"
+    "commander": "^14.0.3",
+    "docx": "^9.6.1",
+    "webview-bun": "^2.4.0",
+    "xlsx": "^0.18.5"
   }
 }
