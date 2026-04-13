@@ -385,21 +385,7 @@ async function extractZipEntry(data: Uint8Array, targetPath: string): Promise<Ui
 }
 
 async function inflateData(data: Uint8Array, expectedSize: number): Promise<Uint8Array> {
-    // Try Bun's built-in decompress first (most reliable in Bun runtime)
-    try {
-        // Bun supports Buffer-like operations on Uint8Array
-        const result = await Bun.write(
-            new Uint8Array(expectedSize),
-            new Response(data).body! as unknown as BodyInit,
-        );
-        if (result && result instanceof Uint8Array && result.length > 0) {
-            return result;
-        }
-    } catch {
-        // fall through to other methods
-    }
-
-    // Method 2: Use DecompressionStream if available
+    // Method 1: Use DecompressionStream if available
     try {
         if (typeof DecompressionStream !== "undefined") {
             const ds = new DecompressionStream("deflate-raw");

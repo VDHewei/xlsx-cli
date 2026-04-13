@@ -52,6 +52,7 @@ describe("user-settings", () => {
             const custom: UserSettings = {
                 lang: "en",
                 apiHost: "http://example.com",
+                defaultSaveDir: "",
                 rules: [{ name: "Test", type: "cell", values: ["a", "b"], applyTo: "A1" }],
                 customFunctions: [{ name: "testFn", code: "return 1" }],
             };
